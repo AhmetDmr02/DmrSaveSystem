@@ -55,7 +55,6 @@ using System.IO;
 
 public class Inventory : MonoBehaviour, IDmrSaveable
 {
-    // Modeled after NetworkObject's GlobalObjectIdHash.
     // Must be unique across ALL saveables in your project.
     [Tooltip("Must be unique and constant. Do not use random generation.")]
     [SerializeField] private string deterministicId = "Inv_Player_Main";
@@ -100,7 +99,7 @@ public class Inventory : MonoBehaviour, IDmrSaveable
 Objects must register with the manager before any save or load occurs, similar to how `NetworkObjects` register with the `NetworkManager`.
 
 ```csharp
-void Awake()    => DmrSaveManager.RegisterSaveable(this);
+void Awake() => DmrSaveManager.RegisterSaveable(this);
 ```
 
 > ⚠️ **Registration order and timing matters.**
@@ -173,7 +172,7 @@ public void Load(BinaryReader reader, bool isSaveFound)
 {
     if (!isSaveFound)
     {
-        // Apply defaults here — do NOT touch reader
+        // Apply defaults here do NOT touch reader
         return;
     }
     // Safe to read from reader below this point
