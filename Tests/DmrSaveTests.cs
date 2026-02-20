@@ -159,7 +159,7 @@ public class DmrSaveTests
     [TearDown]
     public void Teardown()
     {
-        DmrSaveManager.DeleteSaveFile(TEST_SAVE_NAME);
+        //DmrSaveManager.DeleteSaveFile(TEST_SAVE_NAME);
         DmrSaveManager.ClearAllSaveables();
     }
 
@@ -456,8 +456,7 @@ public class DmrSaveTests
         DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
 
         DmrSaveManager.ClearAllSaveables();
-
-        var newA = new MockInventory("Obj_A");
+    var newA = new MockInventory("Obj_A");
         var newTraitor = new ReadTraitor("Traitor_B");
         var newC = new MockInventory("Obj_C");
 
@@ -474,5 +473,316 @@ public class DmrSaveTests
         Assert.AreEqual(300, newC.Gold, "Sandboxing Worked! Object C loaded correctly even though Traitor B crashed.");
 
         Assert.AreEqual(100, newA.Gold);
+    }
+    // A saveable specifically designed to hold variable amounts of raw byte data
+    private class BlobObject : IDmrSaveable
+    {
+        public string ID;
+        public byte[] Data;
+
+        public BlobObject(string id, int sizeInBytes)
+        {
+            ID = id;
+            Data = new byte[sizeInBytes];
+            // Fill with a pattern so we can verify integrity later
+            for (int i = 0; i < sizeInBytes; i++) Data[i] = (byte)(i % 255);
+        }
+
+        public string GetSaveId() => ID;
+
+        public void Save(BinaryWriter writer)
+        {
+            writer.Write(Data.Length);
+            writer.Write(Data);
+        }
+
+        public void Load(BinaryReader reader, bool isSaveFound)
+        {
+            if (!isSaveFound) return;
+            int count = reader.ReadInt32();
+            Data = reader.ReadBytes(count);
+        }
+    }
+
+    [Test]
+    public void Test_Buffer_Elasticity_SmallHugeSmall()
+    {
+        var smallObj = new BlobObject("Small_Start", 100);
+
+        var hugeObj = new BlobObject("Huge_Middle", 1024 * 1024);
+
+        var tinyObj = new BlobObject("Tiny_End", 10);
+
+        DmrSaveManager.RegisterSaveable(smallObj);
+        DmrSaveManager.RegisterSaveable(hugeObj);
+        DmrSaveManager.RegisterSaveable(tinyObj);
+
+        bool saveSuccess = DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        Assert.IsTrue(saveSuccess, "Save should succeed");
+
+        DmrSaveManager.ClearAllSaveables();
+        var loadSmall = new BlobObject("Small_Start", 0);
+        var loadHuge = new BlobObject("Huge_Middle", 0);
+        var loadTiny = new BlobObject("Tiny_End", 0);
+
+        DmrSaveManager.RegisterSaveable(loadSmall);
+        DmrSaveManager.RegisterSaveable(loadHuge);
+        DmrSaveManager.RegisterSaveable(loadTiny);
+
+        bool loadSuccess = DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        Assert.IsTrue(loadSuccess, "Load should succeed");
+
+        Assert.AreEqual(100, loadSmall.Data.Length);
+        Assert.AreEqual(1024 * 1024, loadHuge.Data.Length);
+        Assert.AreEqual(10, loadTiny.Data.Length, "Tiny object should allow reading exactly 10 bytes, not the Huge buffer size.");
+
+        Assert.AreEqual((byte)0, loadTiny.Data[0]);
+        Assert.AreEqual((byte)9, loadTiny.Data[9]);
+    }
+	
+	// Tests if an unloaded object's data survives a save-load cycle where it was completely absent
+    [Test]
+    public void Test_DeadData_IsRetainedAcrossSaves()
+    {
+        var objA = new MockInventory("Retain_A"); objA.Gold = 10;
+        var objB = new MockInventory("Retain_B"); objB.Gold = 20;
+        
+        DmrSaveManager.RegisterSaveable(objA);
+        DmrSaveManager.RegisterSaveable(objB);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+
+        var liveObjA = new MockInventory("Retain_A");
+        DmrSaveManager.RegisterSaveable(liveObjA);
+        
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        
+        var recoveredA = new MockInventory("Retain_A");
+        var recoveredB = new MockInventory("Retain_B");
+        DmrSaveManager.RegisterSaveable(recoveredA);
+        DmrSaveManager.RegisterSaveable(recoveredB);
+        
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        Assert.AreEqual(20, recoveredB.Gold, "Object B data was lost while it was dead.");
+    }
+
+    // Tests if an object spawned after the initial load can manually pull its dead data from the cache
+    [Test]
+    public void Test_DeadData_LateInstantiationRecovery()
+    {
+        var lateObj = new MockInventory("Late_Enemy");
+        lateObj.Gold = 999;
+        DmrSaveManager.RegisterSaveable(lateObj);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        var spawnedLater = new MockInventory("Late_Enemy");
+        
+        DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(spawnedLater);
+        
+        Assert.AreEqual(999, spawnedLater.Gold, "Late instantiated object failed to recover its dead data.");
+    }
+
+    // Ensures that recovering dead data removes it from the stale pool so it isn't duplicated internally
+    [Test]
+    public void Test_DeadData_RemovedFromStaleWhenRecovered()
+    {
+        var obj = new MockInventory("Stale_Test");
+        obj.Gold = 50;
+        DmrSaveManager.RegisterSaveable(obj);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        var recoveredObj = new MockInventory("Stale_Test");
+        DmrSaveManager.RegisterSaveable(recoveredObj);
+        DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(recoveredObj);
+        
+        recoveredObj.Gold = 100;
+        
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        DmrSaveManager.ClearAllSaveables();
+        
+        var finalObj = new MockInventory("Stale_Test");
+        DmrSaveManager.RegisterSaveable(finalObj);
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        Assert.AreEqual(100, finalObj.Gold, "Data reverted to stale version because it wasn't removed from the dead pool.");
+    }
+
+    // Tests if dead data can survive being passed through multiple consecutive saves without ever being loaded
+    [Test]
+    public void Test_DeadData_MultipleSavesWhileDead()
+    {
+        var survivor = new MockInventory("Survivor");
+        survivor.Gold = 777;
+        DmrSaveManager.RegisterSaveable(survivor);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        for (int i = 0; i < 5; i++)
+        {
+            DmrSaveManager.ClearAllSaveables();
+            DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+            DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        }
+        
+        DmrSaveManager.ClearAllSaveables();
+        var revived = new MockInventory("Survivor");
+        DmrSaveManager.RegisterSaveable(revived);
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        Assert.AreEqual(777, revived.Gold, "Dead data decayed or was lost after multiple generations of saving.");
+    }
+
+    // Tests calling the late instantiation load method on an object that has no previous save data
+    [Test]
+    public void Test_DeadData_LateInstantiate_WithNoData()
+    {
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        var brandNew = new MockInventory("Brand_New_Item");
+        brandNew.Gold = 15;
+        
+        DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(brandNew);
+        
+        Assert.AreEqual(15, brandNew.Gold, "Brand new object was corrupted by empty dead data pull.");
+    }
+
+    // Ensures loading a new file completely clears the dead data from the previous file
+    [Test]
+    public void Test_DeadData_DifferentFilesDoNotMix()
+    {
+        string file1 = TEST_SAVE_NAME + "_1";
+        string file2 = TEST_SAVE_NAME + "_2";
+        
+        var objA = new MockInventory("Cross_A"); objA.Gold = 1;
+        DmrSaveManager.RegisterSaveable(objA);
+        DmrSaveManager.SaveToFile(file1);
+        
+        DmrSaveManager.ClearAllSaveables();
+        var objB = new MockInventory("Cross_B"); objB.Gold = 2;
+        DmrSaveManager.RegisterSaveable(objB);
+        DmrSaveManager.SaveToFile(file2);
+        
+        DmrSaveManager.ClearAllSaveables();
+        DmrSaveManager.LoadFromFile(file1);
+        DmrSaveManager.LoadFromFile(file2); 
+        
+        var testObj = new MockInventory("Cross_A");
+        testObj.Gold = 0;
+        DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(testObj);
+        
+        Assert.AreEqual(0, testObj.Gold, "Ghost data from File 1 bled into File 2's dead data pool.");
+        
+        DmrSaveManager.DeleteSaveFile(file1);
+        DmrSaveManager.DeleteSaveFile(file2);
+    }
+
+    // Tests if an extremely large object can safely sit in the dead data dictionary without breaking writes
+    [Test]
+    public void Test_DeadData_HeavyObjectRetention()
+    {
+        var heavy = new BlobObject("Heavy_Dead", 1024 * 512); 
+        heavy.Data[0] = 42;
+        DmrSaveManager.RegisterSaveable(heavy);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        var recovered = new BlobObject("Heavy_Dead", 0);
+        DmrSaveManager.RegisterSaveable(recovered);
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        Assert.AreEqual(1024 * 512, recovered.Data.Length);
+        Assert.AreEqual(42, recovered.Data[0]);
+    }
+
+    // Tests if interleaving dead data and live data corrupts the file stream offsets
+    [Test]
+    public void Test_DeadData_DoesNotBleedIntoLive()
+    {
+        var dead1 = new MockInventory("Dead_1"); dead1.Gold = 10;
+        var live1 = new MockInventory("Live_1"); live1.Gold = 20;
+        var dead2 = new MockInventory("Dead_2"); dead2.Gold = 30;
+        
+        DmrSaveManager.RegisterSaveable(dead1);
+        DmrSaveManager.RegisterSaveable(live1);
+        DmrSaveManager.RegisterSaveable(dead2);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        var newLive = new MockInventory("Live_1");
+        DmrSaveManager.RegisterSaveable(newLive);
+        
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        Assert.AreEqual(20, newLive.Gold, "Live object read the wrong data because of adjacent dead objects.");
+    }
+
+    // Tests recovering one dead object but leaving another dead, ensuring both are handled correctly on the next save
+    [Test]
+    public void Test_DeadData_PartialRecovery()
+    {
+        var a = new MockInventory("A"); a.Gold = 1;
+        var b = new MockInventory("B"); b.Gold = 2;
+        var c = new MockInventory("C"); c.Gold = 3;
+        
+        DmrSaveManager.RegisterSaveable(a);
+        DmrSaveManager.RegisterSaveable(b);
+        DmrSaveManager.RegisterSaveable(c);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        var recB = new MockInventory("B");
+        DmrSaveManager.RegisterSaveable(recB);
+        DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(recB);
+        recB.Gold = 200;
+        
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        var finalA = new MockInventory("A");
+        var finalB = new MockInventory("B");
+        var finalC = new MockInventory("C");
+        DmrSaveManager.RegisterSaveable(finalA);
+        DmrSaveManager.RegisterSaveable(finalB);
+        DmrSaveManager.RegisterSaveable(finalC);
+        
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        
+        Assert.AreEqual(1, finalA.Gold);
+        Assert.AreEqual(200, finalB.Gold);
+        Assert.AreEqual(3, finalC.Gold);
+    }
+
+    // Ensures that the Traitor class data is perfectly preserved in dead data even if it contains stream-breaking garbage
+    [Test]
+    public void Test_DeadData_TraitorPreservation()
+    {
+        var traitor = new BleedingTraitor("Dead_Traitor");
+        DmrSaveManager.RegisterSaveable(traitor);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        DmrSaveManager.ClearAllSaveables();
+        DmrSaveManager.LoadFromFile(TEST_SAVE_NAME);
+        DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        
+        long size = DmrSaveManager.GetSaveFileSize(TEST_SAVE_NAME);
+        
+        Assert.IsTrue(size > 400, "Traitor data was truncated or lost while acting as dead data.");
     }
 }

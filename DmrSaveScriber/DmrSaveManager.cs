@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 
 namespace DmrSaveScriber
@@ -15,6 +16,9 @@ namespace DmrSaveScriber
         private static readonly List<IDmrSaveable> _saveables = new List<IDmrSaveable>();
         private static readonly Dictionary<Type, ISaveableSurrogate> _surrogates = new Dictionary<Type, ISaveableSurrogate>();
         private static readonly Dictionary<string, int> _saveableOrder = new Dictionary<string, int>();
+
+        // Saves the leftover data from the last save. that aren't currently in the saveables
+        private const bool SAVE_DEAD_DATA = true;
 
         private const uint SAVE_VERSION = 1;
         private const uint MAGIC_NUMBER = 0x65647573;
@@ -265,7 +269,9 @@ namespace DmrSaveScriber
                     // Write header
                     writer.Write(MAGIC_NUMBER);
                     writer.Write(SAVE_VERSION);
-                    writer.Write(validSaveables.Count);
+                    int staleCount = SAVE_DEAD_DATA ? _loadedStaleData.Count : 0;
+
+                    writer.Write(validSaveables.Count + staleCount);
 
                     // Save all valid saveables
                     int successCount = 0;
@@ -279,6 +285,16 @@ namespace DmrSaveScriber
                         {
                             // Log the failure but continue with other objects
                             LogWarning($"Failed to save object at index {i}, continuing with remaining objects");
+                        }
+                    }
+
+                    if (SAVE_DEAD_DATA)
+                    {
+                        foreach (var kvp in _loadedStaleData)
+                        {
+                            writer.Write(kvp.Key);   
+                            writer.Write(kvp.Value.Length); 
+                            writer.Write(kvp.Value);
                         }
                     }
 
@@ -307,6 +323,8 @@ namespace DmrSaveScriber
             }
         }
 
+        private static Dictionary<string, byte[]> _loadedStaleData = new Dictionary<string, byte[]>();
+
         public static bool LoadFromFile(string savename, string customPath = null)
         {
             savename = NormalizeSaveName(savename);
@@ -322,6 +340,8 @@ namespace DmrSaveScriber
 
             try
             {
+                _loadedStaleData.Clear();
+                
                 using (FileStream fileStream = new FileStream(savePath, FileMode.Open, FileAccess.Read))
                 using (BinaryReader fileReader = new BinaryReader(fileStream))
                 {
@@ -383,9 +403,17 @@ namespace DmrSaveScriber
                         }
                         else
                         {
-                            // Object in file, but not in scene (Destroyed? Unloaded?) -> Skip
-                            fileStream.Seek(dataLength, SeekOrigin.Current);
-                            LogWarning($"Saveable with ID '{id}' not found in scene, skipping");
+                            if (SAVE_DEAD_DATA)
+                            {
+                                byte[] deadData = fileReader.ReadBytes(dataLength);
+                                _loadedStaleData[id] = deadData;
+                                Log($"Cached dead data for later: {id}");
+                            }
+                            else
+                            {
+                                fileStream.Seek(dataLength, SeekOrigin.Current);
+                                LogWarning($"Saveable with ID '{id}' not found in scene, skipping");
+                            }
                         }
                     }
 
@@ -433,6 +461,45 @@ namespace DmrSaveScriber
             {
                 LogError($"Load failed: {ex.Message}");
                 return false;
+            }
+        }
+
+        // Calls IDmrSaveable.Load on the object returns null writer if no data is found
+        // We only keep dead data if SAVE_DEAD_DATA is true, so found objects data is not stored
+        public static void LoadDeadObjectFromPreviousLoadedData(IDmrSaveable saveable)
+        {
+            try
+            {
+                string getID = saveable.GetSaveId();
+
+                if (_loadedStaleData.TryGetValue(getID, out byte[] data))
+                {
+                    int dataLength = data.Length;
+
+                    if (_sharedStream.Capacity < dataLength)
+                        _sharedStream.Capacity = dataLength;
+
+                    _sharedStream.Position = 0;
+                    _sharedStream.SetLength(dataLength);
+
+                    Array.Copy(data, _sharedStream.GetBuffer(), dataLength);
+
+                    _sharedStream.Position = 0;
+
+                    saveable.Load(_sharedStreamReader, true);
+
+                    if (_saveables.Contains(saveable) && _saveableOrder.ContainsKey(getID))
+                        _loadedStaleData.Remove(getID);
+                }
+                else
+                {
+                    Log("No saved data is found");
+                    saveable.Load(null, false);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"Failed to load object {saveable.GetSaveId()}: {ex.Message}");
             }
         }
 
@@ -504,6 +571,11 @@ namespace DmrSaveScriber
         private static bool SaveSingleObject(IDmrSaveable saveable, BinaryWriter fileWriter)
         {
             string saveId = saveable.GetSaveId();
+
+            if(_loadedStaleData.ContainsKey(saveId))
+            {
+                _loadedStaleData.Remove(saveId);
+            }
 
             try
             {
