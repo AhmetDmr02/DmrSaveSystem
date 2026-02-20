@@ -141,7 +141,7 @@ public void SpawnEnemy(GameObject prefab, string deterministicId)
     // Pull its historical data out of the Dead Data cache immediately
     DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(enemy);
 }
-
+```
 ---
 
 ### Registering a Custom Surrogate
