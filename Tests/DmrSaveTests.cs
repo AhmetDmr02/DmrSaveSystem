@@ -785,4 +785,36 @@ public class DmrSaveTests
         
         Assert.IsTrue(size > 400, "Traitor data was truncated or lost while acting as dead data.");
     }
+    private class MockUnitySaveable : MonoBehaviour, IDmrSaveable
+    {
+        public string ID = "Unity_Mock_1";
+        public string GetSaveId() => ID;
+
+        public void Save(BinaryWriter writer) { writer.Write(42); }
+        public void Load(BinaryReader reader, bool isSaveFound)
+        {
+            if (isSaveFound) reader.ReadInt32();
+        }
+    }
+    // Verifies that the internal cleanup method successfully identifies and purges destroyed Unity objects before saving
+    [Test]
+    public void Test_Cleanup_RemovesDestroyedUnityObjects()
+    {
+        var survivor = new MockInventory("Standard_Survivor");
+        DmrSaveManager.RegisterSaveable(survivor);
+
+        var go = new GameObject("TempSaveableObject");
+        var unitySaveable = go.AddComponent<MockUnitySaveable>();
+        DmrSaveManager.RegisterSaveable(unitySaveable);
+
+        Assert.AreEqual(2, DmrSaveManager.GetRegisteredCount(), "Both objects should be registered.");
+
+        UnityEngine.Object.DestroyImmediate(go);
+
+        bool saveSuccess = DmrSaveManager.SaveToFile(TEST_SAVE_NAME);
+        Assert.IsTrue(saveSuccess, "Save should succeed despite the destroyed object.");
+
+        Assert.AreEqual(1, DmrSaveManager.GetRegisteredCount(), "Registry failed to purge the destroyed Unity object!");
+        Assert.AreEqual("Standard_Survivor", DmrSaveManager.GetRegisteredIds()[0], "The wrong object was purged!");
+    }
 }

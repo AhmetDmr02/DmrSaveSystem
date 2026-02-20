@@ -168,91 +168,15 @@ namespace DmrSaveScriber
 
             try
             {
-                // First pass: Clean up null objects and validate SaveIDs
-                List<IDmrSaveable> validSaveables = new List<IDmrSaveable>();
-                List<int> nullIndices = new List<int>();
-                int originalCount = _saveables.Count;
+                CleanupNullAndDestroyedSaveables();
 
-                for (int i = 0; i < _saveables.Count; i++)
-                {
-                    IDmrSaveable saveable = _saveables[i];
-
-                    if (saveable == null)
-                    {
-                        nullIndices.Add(i);
-                        LogWarning($"Found null saveable at index {i}, will be cleaned up");
-                        continue;
-                    }
-
-                    // Check if it's a Unity object that has been destroyed
-                    if (saveable is UnityEngine.Object unityObj && unityObj == null)
-                    {
-                        nullIndices.Add(i);
-                        LogWarning($"Found destroyed Unity object at index {i}, will be cleaned up");
-                        continue;
-                    }
-
-                    string saveId = null;
-                    try
-                    {
-                        saveId = saveable.GetSaveId();
-                    }
-                    catch (Exception ex)
-                    {
-                        // This catches the "has been destroyed" exception and others
-                        LogWarning($"Failed to get SaveID from saveable at index {i}: {ex.Message}. Marking for cleanup.");
-                        nullIndices.Add(i);
-                        continue;
-                    }
-
-                    if (string.IsNullOrEmpty(saveId))
-                    {
-                        LogWarning($"Saveable at index {i} has null or empty SaveID. Skipping this object.");
-                        continue;
-                    }
-
-                    validSaveables.Add(saveable);
-                }
-
-                // Clean up null objects if any were found
-                if (nullIndices.Count > 0)
-                {
-                    LogWarning($"Cleaning up {nullIndices.Count} null objects from save registry");
-
-                    // Remove null objects in reverse order to maintain indices
-                    for (int i = nullIndices.Count - 1; i >= 0; i--)
-                    {
-                        _saveables.RemoveAt(nullIndices[i]);
-                    }
-
-                    // Rebuild the order dictionary
-                    _saveableOrder.Clear();
-                    for (int i = 0; i < _saveables.Count; i++)
-                    {
-                        try
-                        {
-                            string saveId = _saveables[i]?.GetSaveId();
-                            if (!string.IsNullOrEmpty(saveId))
-                            {
-                                _saveableOrder[saveId] = i;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            LogWarning($"Failed to rebuild order for saveable at index {i}: {ex.Message}");
-                        }
-                    }
-
-                    Log($"Registry cleanup complete. Reduced from {originalCount} to {_saveables.Count} objects");
-                }
-
-                if (validSaveables.Count == 0)
+                if (_saveables.Count == 0)
                 {
                     LogWarning("No valid saveables found to save");
                     return false;
                 }
 
-                Log($"Proceeding with save of {validSaveables.Count} valid objects");
+                Log($"Proceeding with save of {_saveables.Count} valid objects");
 
                 // Create backup if enabled and file exists
                 if (EnableBackups && File.Exists(savePath))
@@ -271,13 +195,13 @@ namespace DmrSaveScriber
                     writer.Write(SAVE_VERSION);
                     int staleCount = SAVE_DEAD_DATA ? _loadedStaleData.Count : 0;
 
-                    writer.Write(validSaveables.Count + staleCount);
+                    writer.Write(_saveables.Count + staleCount);
 
                     // Save all valid saveables
                     int successCount = 0;
-                    for (int i = 0; i < validSaveables.Count; i++)
+                    for (int i = 0; i < _saveables.Count; i++)
                     {
-                        if (SaveSingleObject(validSaveables[i], writer))
+                        if (SaveSingleObject(_saveables[i], writer))
                         {
                             successCount++;
                         }
@@ -309,7 +233,7 @@ namespace DmrSaveScriber
                         return false;
                     }
 
-                    Log($"Successfully saved {successCount}/{validSaveables.Count} objects");
+                    Log($"Successfully saved {successCount}/{_saveables.Count} objects");
                 }
 
                 bool success = TryFinalizeSaveFile(tempPath, savePath);
@@ -505,64 +429,20 @@ namespace DmrSaveScriber
 
         public static int CleanupNullAndDestroyedSaveables()
         {
-            int cleanedCount = 0;
+            int originalCount = _saveables.Count;
 
-            for (int i = _saveables.Count - 1; i >= 0; i--)
-            {
-                bool shouldRemove = false;
+            _saveables.RemoveAll(s => s == null || (s is UnityEngine.Object unityObj && unityObj == null));
 
-                if (_saveables[i] == null)
-                {
-                    shouldRemove = true;
-                }
-                else if (_saveables[i] is UnityEngine.Object unityObj && unityObj == null)
-                {
-                    shouldRemove = true;
-                }
-                else
-                {
-                    // Test if GetSaveID throws (destroyed object)
-                    try
-                    {
-                        _saveables[i].GetSaveId();
-                    }
-                    catch
-                    {
-                        shouldRemove = true;
-                    }
-                }
-
-                if (shouldRemove)
-                {
-                    _saveables.RemoveAt(i);
-                    cleanedCount++;
-                }
-            }
+            int cleanedCount = originalCount - _saveables.Count;
 
             if (cleanedCount > 0)
             {
-                // Rebuild order dictionary
                 _saveableOrder.Clear();
                 for (int i = 0; i < _saveables.Count; i++)
                 {
-                    try
-                    {
-                        if (_saveables[i] is UnityEngine.Object unityObj && unityObj == null)
-                            continue;
-
-                        string saveId = _saveables[i]?.GetSaveId();
-                        if (!string.IsNullOrEmpty(saveId))
-                        {
-                            _saveableOrder[saveId] = i;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        LogWarning($"Failed to rebuild order for saveable at index {i}: {ex.Message}");
-                    }
+                    _saveableOrder[_saveables[i].GetSaveId()] = i;
                 }
-
-                Log($"Cleaned up {cleanedCount} null/destroyed saveables from registry");
+                Log($"Cleaned up {cleanedCount} objects.");
             }
 
             return cleanedCount;
