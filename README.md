@@ -18,6 +18,8 @@ This system is designed for games requiring deterministic state management, mini
 
 **Reduced-Garbage Design:** Uses a reusable 4KB `MemoryStream` buffer for object serialization to minimize GC spikes on the hot path. Note that the save pass itself still allocates temporary lists for validation. This is a known trade-off, not a zero-allocation guarantee.
 
+**Persistent Dead Data (Optional)**: Automatically caches data for objects that exist in the save file but are not currently loaded in the scene. When the game saves again, this "dead data" is perfectly preserved if `SAVE_DEAD_DATA` is set to true (which is `true` by default), preventing data loss for the object that is not registered at the exact load time.
+
 ---
 
 ## Architecture: The "Network Object" Approach
@@ -104,8 +106,11 @@ void Awake() => DmrSaveManager.RegisterSaveable(this);
 
 > ⚠️ **Registration order and timing matters.**
 >
-> LoadFromFile() is a single linear pass over the file it reads each object's payload and immediately dispatches it to the matching **registered** object, then discards it. No data is held in memory after the pass completes, and no reflection or looping over all objects is used to discover objects at runtime. This is intentional. Retaining the file contents or scanning the scene for potential recipients would reintroduce the allocation and coupling overhead the system is designed to avoid.
-The consequence is that any object registering after LoadFromFile() runs will never receive a Load() call at all — not even the isSaveFound = false branch. In practice, call LoadFromFile() after all relevant Start() methods have completed.
+> `LoadFromFile()` executes a single, high speed linear pass over the save file. It reads each object's payload and immediately dispatches it to the matching **registered** object.
+>
+> Any data belonging to objects **not currently registered** is routed into the "Dead Data" cache. (if `SAVE_DEAD_DATA` set to true.) No reflection or scene scanning is used to discover objects dynamically, as that would introduce massive performance overhead.
+> 
+> The consequence is that any object registering *after* `LoadFromFile()` has run will **not** automatically receive a `Load()` call. If you instantiate an object late (e.g., spawning an enemy or a map chunk mid-game), you must set `SAVE_DEAD_DATA` from inside of `DmrSaveManager.cs` to true and manually call `DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(this)` to pull its historical state from the cache.
 
 ### Saving & Loading
 
@@ -116,6 +121,26 @@ DmrSaveManager.SaveToFile("MyGameSave");
 // Loads data and distributes it to all currently registered objects
 DmrSaveManager.LoadFromFile("MyGameSave");
 ```
+
+### Dynamic Spawning (Late Instantiation)
+
+If you instantiate an enemy or chunk *after* `LoadFromFile` has already run, you can manually ask the manager to check the "Dead Data" cache for that specific object's historical state.
+
+```csharp
+public void SpawnEnemy(GameObject prefab, string deterministicId)
+{
+    GameObject obj = Instantiate(prefab);
+    var enemy = obj.GetComponent<EnemyController>();
+    
+    // Assign its deterministic ID
+    enemy.SetSaveId(deterministicId);
+    
+    // Register it so it gets included in future SaveToFile() calls
+    DmrSaveManager.RegisterSaveable(enemy);
+    
+    // Pull its historical data out of the Dead Data cache immediately
+    DmrSaveManager.LoadDeadObjectFromPreviousLoadedData(enemy);
+}
 
 ---
 
